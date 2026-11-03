@@ -2,7 +2,7 @@ name: Guy Driver - surveillance exterieure
 run-name: ${{ inputs.test_alert && 'TEST - alerte technique Guy Driver' || 'Guy Driver - disponibilite' }}
 on:
   schedule:
-    - cron: '7,22,37,52 * * * *'
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       test_alert:
