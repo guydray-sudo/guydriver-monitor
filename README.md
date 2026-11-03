@@ -2,7 +2,7 @@
 
 Contrôle gratuit des seules pages publiques de https://guydriver.com/, sans identifiants IONOS, données clients, SMTP ni IA payante.
 
-- Exécution sur un serveur GitHub standard toutes les quinze minutes : minutes 07, 22, 37 et 52 en UTC. Les horaires sont indicatifs et peuvent être retardés par GitHub.
+- Exécution sur un serveur GitHub standard toutes les quinze minutes : minutes 00, 15, 30 et 45 en UTC. Les horaires sont indicatifs et peuvent être retardés par GitHub.
 - Vérifie l’accueil, la santé du site, le concierge sans IA payante et la protection de la configuration (HEAD uniquement, contenu privé jamais lu).
 - Deux contrôles en cas d’échec avant l’alerte. Notification GitHub au propriétaire au début de l’incident, puis au maximum une fois par 24 heures si l’incident persiste.
 - Le réglage du compte propriétaire utilise les e-mails pour les exécutions échouées. Aucun destinataire client n’est utilisé.
