@@ -1,0 +1,112 @@
+name: Guy Driver - surveillance exterieure
+run-name: ${{ inputs.test_alert && 'TEST - alerte technique Guy Driver' || 'Guy Driver - disponibilite' }}
+on:
+  schedule:
+    - cron: '7,22,37,52 * * * *'
+  workflow_dispatch:
+    inputs:
+      test_alert:
+        description: 'Envoyer une notification GitHub de controle, sans modifier le site'
+        required: false
+        default: false
+        type: boolean
+permissions:
+  contents: write
+concurrency:
+  group: guydriver-public-monitor
+  cancel-in-progress: false
+jobs:
+  availability:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verifier le site public et le dernier passage des sauvegardes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GD_TEST_ALERT: ${{ inputs.test_alert && '1' || '0' }}
+        run: |
+          python3 - <<'PY'
+          """Public-only availability checks. No customer data, SMTP credential or paid API."""
+          import base64,json,os,time
+          from concurrent.futures import ThreadPoolExecutor
+          from datetime import datetime,timezone
+          from urllib.request import Request,build_opener,HTTPRedirectHandler
+          from urllib.error import HTTPError
+          
+          REPOSITORY='guydray-sudo/guydriver-monitor'
+          API='https://api.github.com/repos/'+REPOSITORY+'/contents/status.json'
+          PROBES=[('home','','GET'),('health','api/health.php','GET'),('concierge','api/concierge.php','GET'),('private','api/config.local.php','HEAD')]
+          
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self,*args,**kwargs):return None
+          
+          def probe(item):
+              name,path,method=item
+              try:
+                  request=Request('https://guydriver.com/'+path,method=method,headers={'User-Agent':'GuyDriver-External-Public-Monitor','Accept-Encoding':'identity'})
+                  try:response=build_opener(NoRedirect()).open(request,timeout=12)
+                  except HTTPError as error:response=error
+                  with response:
+                      status=response.status
+                      if method=='HEAD':return name,status==403
+                      body=response.read(300001)
+                      if status!=200 or len(body)>300000:return name,False
+                      if name=='home':return name,b'Guy Driver' in body and b'public-site' in body
+                      if response.headers.get('X-GuyDriver-Mode')!='production':return name,False
+                      data=json.loads(body)
+                      if name=='health':return name,data=={'status':'ok'}
+                      return name,isinstance(data,dict) and data.get('enabled') is True and data.get('ai') is False
+              except Exception:return name,False
+          
+          def decide(old,failed,now):
+              status='incident' if failed else 'ok'
+              alert=bool(failed) and (old.get('status')!='incident' or now-int(old.get('last_alert',0))>=86400)
+              update=status!=old.get('status') or alert or now-int(old.get('checked_at',0))>=7*86400
+              state={'version':1,'status':status,'checked_at':now,'last_alert':now if alert else int(old.get('last_alert',0))}
+              return state,alert,update
+          
+          def github(method='GET',payload=None):
+              token=os.environ['GH_TOKEN']
+              if os.environ.get('GITHUB_REPOSITORY')!=REPOSITORY:raise RuntimeError('Unexpected repository')
+              req=Request(API,method=method,data=None if payload is None else json.dumps(payload).encode(),headers={'Authorization':'Bearer '+token,'Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28','Content-Type':'application/json','User-Agent':'GuyDriver-Public-Monitor'})
+              try:
+                  with build_opener(NoRedirect()).open(req,timeout=15) as response:return json.loads(response.read(100000))
+              except HTTPError as e:
+                  if method=='GET' and e.code==404:return None
+                  raise RuntimeError('Monitor state API unavailable') from None
+          
+          def main():
+              if os.environ.get('GD_TEST_ALERT')=='1':
+                  print('TEST UNIQUEMENT — alerte de contrôle demandée par le propriétaire. Aucun incident réel simulé sur le site et aucun état public modifié.')
+                  return 1
+              with ThreadPoolExecutor(max_workers=4) as executor:rows=list(executor.map(probe,PROBES))
+              failed=[name for name,ok in rows if not ok]
+              if failed:
+                  time.sleep(5)
+                  with ThreadPoolExecutor(max_workers=4) as executor:confirmed=list(executor.map(probe,[p for p in PROBES if p[0] in failed]))
+                  failed=[name for name,ok in confirmed if not ok]
+              item=github();old={}
+              if item:
+                  old=json.loads(base64.b64decode(item['content']))
+                  if not isinstance(old,dict) or old.get('version')!=1 or old.get('status') not in ['ok','incident']:raise RuntimeError('Monitor state requires review')
+              now=int(time.time());state,alert,update=decide(old,failed,now)
+              if update:
+                  payload={'message':'Update public availability status','content':base64.b64encode((json.dumps(state,indent=2)+'\n').encode()).decode(),'branch':'main'}
+                  if item:payload['sha']=item['sha']
+                  github('PUT',payload)
+              text=('À vérifier : '+', '.join(failed) if failed else 'Les quatre contrôles publics répondent normalement.')
+              print(text)
+              if failed and not alert:print('Incident déjà signalé ; pas de nouvelle alerte avant 24 heures. Le statut public reste incident.')
+              if old.get('status')=='incident' and not failed:print('Rétablissement constaté. Le statut public est revenu à ok.')
+              summary=os.environ.get('GITHUB_STEP_SUMMARY')
+              if summary:
+                  with open(summary,'a',encoding='utf8') as file:file.write(text+'\n\nContrôles anonymes uniquement. Aucun dossier client ni service payant.\n')
+              return 1 if alert else 0
+          
+          if __name__=='__main__':
+              try:raise SystemExit(main())
+              except Exception:
+                  print('Surveillance à examiner : contrôle ou registre extérieur indisponible. Aucun secret ni contenu de réponse affiché.')
+                  raise SystemExit(1)
+          PY
+
