@@ -1,5 +1,5 @@
 name: Guy Driver - surveillance exterieure
-run-name: ${{ inputs.test_alert && 'TEST - alerte technique Guy Driver' || 'Guy Driver - disponibilite' }}
+run-name: ${{ inputs.test_resend && !inputs.test_alert && 'TEST - reception Resend Guy Driver' || inputs.test_alert && 'TEST - alerte technique Guy Driver' || 'Guy Driver - disponibilite' }}
 on:
   schedule:
     - cron: '*/15 * * * *'
@@ -10,6 +10,11 @@ on:
         required: false
         default: false
         type: boolean
+      test_resend:
+        description: 'Tester la réception directe via Resend, sans déclencher une panne'
+        required: false
+        default: false
+        type: boolean
 permissions:
   contents: write
 concurrency:
@@ -17,6 +22,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   availability:
+    if: ${{ !inputs.test_resend || inputs.test_alert }}
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
@@ -110,3 +116,82 @@ jobs:
                   raise SystemExit(1)
           PY
 
+  resend-alert:
+    name: Envoi direct de l’alerte Guy Driver
+    needs: availability
+    if: ${{ !cancelled() && github.repository == 'guydray-sudo/guydriver-monitor' && github.ref == 'refs/heads/main' && !inputs.test_alert && (inputs.test_resend || needs.availability.result == 'failure') }}
+    permissions: {}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Envoyer une alerte technique sans données client
+        env:
+          GD_RESEND_KEY: ${{ secrets.GD_RESEND_KEY }}
+          GD_ALERT_RECIPIENT: ${{ secrets.GD_ALERT_RECIPIENT }}
+          GD_RESEND_TEST: ${{ inputs.test_resend && '1' || '0' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import time
+          from urllib.error import HTTPError, URLError
+          from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, *args, **kwargs):
+                  return None
+
+          def main():
+              testing = os.environ['GD_RESEND_TEST'] == '1'
+              key = os.environ.get('GD_RESEND_KEY', '').strip()
+              recipient = os.environ.get('GD_ALERT_RECIPIENT', '').strip()
+              if not key or not recipient:
+                  print('Envoi direct non configuré. Voir les réglages du dépôt.')
+                  return 1 if testing else 0
+              if not re.fullmatch(r'[A-Za-z0-9._+%-]+@gmail\.com', recipient):
+                  print('Destinataire invalide : une seule adresse Gmail est requise.')
+                  return 1
+
+              run_id = os.environ['GITHUB_RUN_ID']
+              run_url = f'https://github.com/guydray-sudo/guydriver-monitor/actions/runs/{run_id}'
+              purpose = 'test' if testing else 'incident'
+              subject = ('Guy Driver · TEST de réception GitHub' if testing
+                         else 'Guy Driver · Alerte de surveillance GitHub')
+              message = ('Test volontaire de la réception des alertes du moniteur externe.'
+                         if testing else 'Le contrôle automatique du moniteur externe a échoué.')
+              payload = json.dumps({
+                  'from': 'Guy Driver Surveillance <surveillance@alertes.guydriver.com>',
+                  'to': [recipient],
+                  'subject': subject,
+                  'text': f'{message}\n\nExécution GitHub : {run_url}',
+              }).encode()
+              request = Request('https://api.resend.com/emails', data=payload, method='POST', headers={
+                  'Authorization': 'Bearer ' + key,
+                  'Content-Type': 'application/json',
+                  'User-Agent': 'GuyDriver-GitHub-Monitor/1.0',
+                  'Idempotency-Key': f'guydriver-monitor/{purpose}/{run_id}',
+              })
+              opener = build_opener(NoRedirect())
+              for attempt in range(2):
+                  try:
+                      with opener.open(request, timeout=12) as response:
+                          accepted = json.loads(response.read(8192))
+                      if not isinstance(accepted, dict) or not accepted.get('id'):
+                          print('Resend n’a pas renvoyé de confirmation exploitable.')
+                          return 1
+                      print('Message accepté par Resend. La réception se vérifie dans Gmail.')
+                      return 0
+                  except HTTPError as error:
+                      if error.code not in (429, 500, 502, 503, 504) or attempt:
+                          print(f'Envoi refusé par Resend (HTTP {error.code}).')
+                          return 1
+                  except (URLError, TimeoutError):
+                      if attempt:
+                          print('Resend indisponible après deux tentatives.')
+                          return 1
+                  time.sleep(2)
+              return 1
+
+          raise SystemExit(main())
+          PY
