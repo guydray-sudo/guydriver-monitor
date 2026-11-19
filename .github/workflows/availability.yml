@@ -148,7 +148,7 @@ jobs:
               recipient = os.environ.get('GD_ALERT_RECIPIENT', '').strip()
               if not key or not recipient:
                   print('Envoi direct non configuré. Voir les réglages du dépôt.')
-                  return 1 if testing else 0
+                  return 1
               if not re.fullmatch(r'[A-Za-z0-9._+%-]+@gmail\.com', recipient):
                   print('Destinataire invalide : une seule adresse Gmail est requise.')
                   return 1
